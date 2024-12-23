@@ -8,7 +8,7 @@ import psutil
 
 from pufferlib import namespace
 from pufferlib.emulation import GymnasiumPufferEnv, PettingZooPufferEnv
-from pufferlib.environment import PufferEnv
+from pufferlib.environment import PufferEnv, set_buffers
 from pufferlib.exceptions import APIUsageError
 from pufferlib.namespace import Namespace
 import pufferlib.spaces
@@ -63,36 +63,15 @@ class Serial:
     def __init__(self, env_creators, env_args, env_kwargs, num_envs, buf=None, **kwargs):
         self.driver_env = env_creators[0](*env_args[0], **env_kwargs[0])
         self.agents_per_batch = self.driver_env.num_agents * num_envs
+        self.num_agents = self.agents_per_batch
 
         self.single_observation_space = self.driver_env.single_observation_space
         self.single_action_space = self.driver_env.single_action_space
         self.action_space = pufferlib.spaces.joint_space(self.single_action_space, self.agents_per_batch)
         self.observation_space = pufferlib.spaces.joint_space(self.single_observation_space, self.agents_per_batch)
 
-        if buf is None:
-            atn_space = self.single_action_space
-            if isinstance(self.single_action_space, pufferlib.spaces.Box):
-                actions = np.zeros((self.agents_per_batch, *atn_space.shape), dtype=atn_space.dtype)
-            else:
-                actions = np.zeros((self.agents_per_batch, *atn_space.shape), dtype=np.int32)
- 
-            buf = namespace(
-                observations = np.zeros(
-                    (self.agents_per_batch, *self.single_observation_space.shape),
-                    dtype=self.single_observation_space.dtype),
-                rewards = np.zeros(self.agents_per_batch, dtype=np.float32),
-                terminals = np.zeros(self.agents_per_batch, dtype=bool),
-                truncations = np.zeros(self.agents_per_batch, dtype=bool),
-                masks = np.ones(self.agents_per_batch, dtype=bool),
-                actions = actions,
-            )
 
-        self.observations = buf.observations
-        self.rewards = buf.rewards
-        self.terminals = buf.terminals
-        self.truncations = buf.truncations
-        self.masks = buf.masks
-        self.actions = buf.actions
+        set_buffers(self, buf)
 
         self.envs = []
         ptr = 0
@@ -110,15 +89,11 @@ class Serial:
             env = env_creators[i](*env_args[i], buf=buf_i, **env_kwargs[i])
             self.envs.append(env)
 
-        #if isinstance(self.envs[0], pufferlib.PufferEnv):
-        #    raise APIUsageError('Native PufferEnvs are not currently compatible with Serial vectorization. Use Native or Multiprocessing')
-
         self.driver_env = driver = self.envs[0]
         self.emulated = self.driver_env.emulated
         check_envs(self.envs, self.driver_env)
         self.agents_per_env = [env.num_agents for env in self.envs]
         assert sum(self.agents_per_env) == self.agents_per_batch
-        self.num_agents = sum(self.agents_per_env)
         self.agent_ids = np.arange(self.num_agents)
         self.initialized = False
         self.flag = RESET
@@ -131,7 +106,9 @@ class Serial:
         for env, s in zip(self.envs, seed):
             ob, i = env.reset(seed=s)
                
-            if i:
+            if isinstance(i, list):
+                infos.extend(i)
+            else:
                 infos.append(i)
 
         self.infos = infos
@@ -152,7 +129,10 @@ class Serial:
                 o, r, d, t, i = env.step(atns)
 
             if i:
-                self.infos.append(i)
+                if isinstance(i, list):
+                    self.infos.extend(i)
+                else:
+                    self.infos.append(i)
 
             ptr = end
 
@@ -183,11 +163,10 @@ def _worker_process(env_creators, env_args, env_kwargs, obs_shape, obs_dtype, at
     )
     buf.masks[:] = True
 
-    if is_native:
+    if is_native and num_envs == 1:
         envs = env_creators[0](*env_args[0], **env_kwargs[0], buf=buf)
     else:
-        envs = Serial(env_creators, env_args, env_kwargs, num_envs)
-        envs._assign_buffers(buf)
+        envs = Serial(env_creators, env_args, env_kwargs, num_envs, buf=buf)
 
     semaphores=np.ndarray(num_workers, dtype=np.uint8, buffer=shm.semaphores)
     start = time.time()
@@ -264,8 +243,6 @@ class Multiprocessing:
         # You can't send a RawArray through a pipe.
         self.driver_env = driver_env = env_creators[0](*env_args[0], **env_kwargs[0])
         is_native = isinstance(driver_env, PufferEnv)
-        if is_native and envs_per_worker != 1:
-            raise APIUsageError('Native PufferEnvs should run multiple envs internally, not in Multiprocessing')
         self.emulated = False if is_native else driver_env.emulated
         self.num_agents = num_agents = driver_env.num_agents * num_envs
         self.agents_per_batch = driver_env.num_agents * batch_size
@@ -615,6 +592,8 @@ def make(env_creator_or_creators, env_args=None, env_kwargs=None, backend=Puffer
         vecenv = env_creator_or_creators(*env_args, **env_kwargs)
         if not isinstance(vecenv, PufferEnv):
             raise APIUsageError('Native vectorization requires a native PufferEnv. Use Serial or Multiprocessing instead.')
+        if num_envs != 1:
+            raise APIUsageError('Native vectorization is for PufferEnvs that handle all per-process vectorization internally. If you want to run multiple separate Python instances on a single process, use Serial or Multiprocessing instead')
 
         return vecenv
 
