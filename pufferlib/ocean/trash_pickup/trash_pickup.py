@@ -52,11 +52,16 @@ class TrashPickupEnv(pufferlib.PufferEnv):
         # self.num_obs = num_obs_trash + num_obs_bin + num_obs_agent;
         
         # 2D Local crop obs space
-        self.num_obs = 1 + ((((agent_sight_range * 2 + 1) * (agent_sight_range * 2 + 1)) * 4));  # whether agent is carrying, and one-hot encoding for all cell types in local crop around agent (minus the cell the agent is currently in)
+        self.num_obs = ((((agent_sight_range * 2 + 1) * (agent_sight_range * 2 + 1)) * 5));  # one-hot encoding for all cell types in local crop around agent (minus the cell the agent is currently in)
 
         self.single_observation_space = spaces.Box(low=0, high=1,
+<<<<<<< HEAD
             shape=(self.num_obs,), dtype=np.float32)
         self.single_action_space = spaces.Discrete(5)
+=======
+            shape=(self.num_obs,), dtype=np.int8)
+        self.single_action_space = spaces.Discrete(4)
+>>>>>>> eb77c95ecdf7645c3c55168db0eda289d1c45c08
 
         super().__init__(buf=buf)
         self.c_envs = CyTrashPickup(self.observations, self.actions, self.rewards, self.terminals, num_envs, num_agents, grid_size, num_trash, num_bins, max_steps, agent_sight_range)
@@ -86,3 +91,24 @@ class TrashPickupEnv(pufferlib.PufferEnv):
         
     def close(self):
         self.c_envs.close() 
+
+def test_performance(timeout=10, atn_cache=1024):
+    env = TrashPickupEnv(num_envs=1024, grid_size=10, num_agents=4,
+        num_trash=20, num_bins=1, max_steps=150, agent_sight_range=5)
+ 
+    env.reset()
+    tick = 0
+
+    actions = np.random.randint(0, 4, (atn_cache, env.num_agents))
+
+    import time
+    start = time.time()
+    while time.time() - start < timeout:
+        atn = actions[tick % atn_cache]
+        env.step(atn)
+        tick += 1
+
+    print(f'SPS: %f', env.num_agents * tick / (time.time() - start))
+
+if __name__ == '__main__':
+    test_performance()

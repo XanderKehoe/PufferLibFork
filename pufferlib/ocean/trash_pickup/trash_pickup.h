@@ -84,7 +84,7 @@ typedef struct {
 
 typedef struct {
     // Interface for PufferLib
-    float* observations;
+    char* observations;
     int* actions;
     float* rewards;
     unsigned char* dones;
@@ -170,13 +170,15 @@ void compute_observations(CTrashPickupEnv* env) {
     int sight_range = env->agent_sight_range;
     int num_cell_types = 4;  // EMPTY, TRASH, BIN, AGENT
 
-    float* obs = env->observations;
+    char* obs = env->observations;
 
-    int obs_index = 0;
+    int obs_dim = 2*env->agent_sight_range + 1;
+    int channel_offset = obs_dim*obs_dim;
+    memset(obs, 0, env->total_num_obs*sizeof(char));
 
     for (int agent_idx = 0; agent_idx < env->num_agents; agent_idx++) {
         // Add obs for whether the agent is carrying or not
-        obs[obs_index++] = env->entities[agent_idx].carrying;
+        //obs[obs_index++] = env->entities[agent_idx].carrying;
 
         // Get the agent's position
         int agent_x = env->entities[agent_idx].pos_x;
@@ -187,35 +189,24 @@ void compute_observations(CTrashPickupEnv* env) {
             for (int dx = -sight_range; dx <= sight_range; dx++) {
                 int cell_x = agent_x + dx;
                 int cell_y = agent_y + dy;
+                int obs_x = dx + env->agent_sight_range;
+                int obs_y = dy + env->agent_sight_range;
 
                 // Check if the cell is within bounds
-                if (cell_x >= 0 && cell_x < env->grid_size && cell_y >= 0 && cell_y < env->grid_size) 
-                {
-                    GridCell* thisGridCell = &env->grid[get_grid_index(env, cell_x, cell_y)];
-                    Entity* thisEntity = thisGridCell->entity;
-
-                    int cell_type;
-                    if (thisEntity){
-                        cell_type = thisEntity->type;
-                    }
-                    else{
-                        cell_type = EMPTY;
-                    }
-                    
-                    // One-hot encode the cell type
-                    for (int type = 0; type < num_cell_types; type++) 
-                    {
-                        obs[obs_index++] = (cell_type == type) ? 1.0f : 0.0f;
-                    }
-                } 
-                else 
-                {
-                    // Out-of-bounds cells are -1
-                    for (int type = 0; type < num_cell_types; type++) 
-                    {
-                        obs[obs_index++] = -1.0f;
-                    }
+                if (cell_x < 0 || cell_x >= env->grid_size || cell_y < 0 || cell_y >= env->grid_size) {
+                    continue;
                 }
+
+                Entity* thisEntity = env->grid[get_grid_index(env, cell_x, cell_y)].entity;
+                if (!thisEntity) {
+                    continue;
+                }
+
+                int offset = agent_idx*5*channel_offset + obs_y*obs_dim + obs_x;
+                int obs_idx = offset + thisEntity->type*channel_offset;
+                obs[obs_idx] = 1;
+                obs_idx = offset + 4*channel_offset;
+                obs[obs_idx] = (float)thisEntity->carrying;
             }
         }
     }
@@ -392,15 +383,14 @@ void initialize_env(CTrashPickupEnv* env) {
 
     env->grid = (GridCell*)calloc(env->grid_size * env->grid_size, sizeof(GridCell));
     env->entities = (Entity*)calloc(env->num_agents + env->num_bins + env->num_trash, sizeof(Entity));
+    env->total_num_obs = env->num_agents * ((((env->agent_sight_range * 2 + 1) * (env->agent_sight_range * 2 + 1)) * 5));
 
     reset(env);
 }
 
 void allocate(CTrashPickupEnv* env) {
-    // env->total_num_obs = env->num_agents * ((env->num_agents * 3) + (env->num_trash * 3) + (env->num_bins * 2)); // Entity attribute based obs space.
-    env->total_num_obs = env->num_agents * (1 + (((env->agent_sight_range * 2 + 1) * (env->agent_sight_range * 2 + 1)) * 4));
 
-    env->observations = (float*)calloc(env->total_num_obs, sizeof(float));
+    env->observations = (char*)calloc(env->total_num_obs, sizeof(char));
     env->actions = (int*)calloc(env->num_agents, sizeof(int));
     env->rewards = (float*)calloc(env->num_agents, sizeof(float));
     env->dones = (unsigned char*)calloc(env->num_agents, sizeof(unsigned char));
