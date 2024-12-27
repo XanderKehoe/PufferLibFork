@@ -21,7 +21,7 @@ void demo(int grid_size, int num_agents, int num_trash, int num_bins, int max_st
 
     if (use_pretrained_model){
         weights = load_weights("resources/trashpickup_weights.bin", 136454);
-        net = make_linearlstm(weights, env.num_agents, env.total_num_obs, 4); // 4 is size of action space
+        net = make_linearlstm(weights, env.num_agents, env.total_num_obs, 5); // 5 is size of action space
     }
 
     allocate(&env);
@@ -40,13 +40,15 @@ void demo(int grid_size, int num_agents, int num_trash, int num_bins, int max_st
                     forward_linearlstm(net, net->obs, env.actions);    
                 }
                 else{
-                    env.actions[i] = rand() % 4; // 0 = UP, 1 = DOWN, 2 = LEFT, 3 = RIGHT
+                    env.actions[i] = rand() % 5; // 0 = UP, 1 = DOWN, 2 = LEFT, 3 = RIGHT, 4 = NOOP
                 }
                 // printf("action: %d \n", env.actions[i]);
             }
 
             // Override human control actions
             if (IsKeyDown(KEY_LEFT_SHIFT)) {
+                env.actions[0] = ACTION_NOOP;
+
                 // Handle keyboard input only for selected agent
                 if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) {
                     env.actions[0] = ACTION_UP;
@@ -96,7 +98,8 @@ void performance_test() {
     int i = 0;
     int inc = env.num_agents;
     while (time(NULL) - start < test_time) {
-        env.actions[0] = rand() % 4;
+        compute_observations(&env);
+        env.actions[0] = rand() % 5;
         step(&env);
         i += inc;
     }
@@ -108,7 +111,7 @@ void performance_test() {
 
 // Main entry point
 int main() {
-    demo(10, 4, 20, 1, 500); // Visual demo
-    // performance_test(); // Uncomment for benchmarking
+    // demo(10, 4, 20, 1, 100); // Visual demo
+    performance_test(); // Uncomment for benchmarking
     return 0;
 }

@@ -56,7 +56,7 @@ class TrashPickupEnv(pufferlib.PufferEnv):
 
         self.single_observation_space = spaces.Box(low=0, high=1,
             shape=(self.num_obs,), dtype=np.float32)
-        self.single_action_space = spaces.Discrete(4)
+        self.single_action_space = spaces.Discrete(5)
 
         super().__init__(buf=buf)
         self.c_envs = CyTrashPickup(self.observations, self.actions, self.rewards, self.terminals, num_envs, num_agents, grid_size, num_trash, num_bins, max_steps, agent_sight_range)
