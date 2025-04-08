@@ -83,7 +83,7 @@ typedef struct {
 
     float velocity;
 
-    float closest_distance_to_goal;
+    float total_episode_reward;
 } Agent;
 
 typedef struct {
@@ -110,8 +110,6 @@ typedef struct {
     Tile* grid;
     float start_y;
     float finish_y;
-
-    // float total_episode_reward;
 
     int total_num_obs;
 
@@ -147,8 +145,13 @@ void compute_observations(CTipToeEnv* env) {
             }
         }
 
-        // Collect relative positions to other agents and sort them
         Agent* a = &env->agents[i];
+
+        // Encode current agent position
+        obs[offset++] = (char) (a->pos_x / env->grid_size_x * CELL_SIZE);
+        obs[offset++] = (char) (a->pos_y / env->grid_size_y * CELL_SIZE);
+
+        // Collect relative positions to other agents and sort them
         int num_others = env->num_agents - 1;
         RelativePos* rels = (RelativePos*)alloca(sizeof(RelativePos) * num_others); // stack-allocated
 
@@ -189,10 +192,73 @@ void compute_observations(CTipToeEnv* env) {
 
 void reset(CTipToeEnv* env); // declaration here so we can use before defined.
 
-void reset_agent(CTipToeEnv* env, int agent_index){
+void reset_agent_position(CTipToeEnv* env, int agent_index){
     Agent* agent = &env->agents[agent_index];
     agent->pos_x = (rand() % env->grid_size_x) * CELL_SIZE;
     agent->pos_y = env->start_y;
+}
+
+void check_agent_in_invalid_position_agent_position(CTipToeEnv* env, int agent_idx){
+    bool invalid = false;
+    Agent* agent = &env->agents[agent_idx];
+    if (agent->pos_x < 0.0f || agent->pos_x >= env->grid_size_x * CELL_SIZE || 
+        agent->pos_y < 0.0f || agent->pos_y >= (env->grid_size_y + 3) * CELL_SIZE) { // 2 cells for start zone and 1 cell for finish line = 3
+        invalid = true;
+    }
+    else{
+        // Check for stepping on a fake or removed tile
+        int finish_line_cell_height = 1;
+        int tile_x = (int) agent->pos_x / CELL_SIZE;
+        int tile_y = (int) (agent->pos_y - CELL_SIZE * finish_line_cell_height) / CELL_SIZE; // adjust for finish line cell size here
+
+        if (tile_y < env->grid_size_y) // check if agent is even on the grid (no need to check for x since should always align in the x-axis with grid)
+        {
+            Tile* tile = &env->grid[get_grid_index(env, tile_x, tile_y)];
+
+            if (tile != NULL){
+                if (tile->state == TILE_REMOVED || tile->is_fake) {
+                    tile->state = TILE_REMOVED;
+                    invalid = true;
+                }
+                else if (tile->state == TILE_UNKNOWN){
+                    tile->state = TILE_REAL;
+                }
+            }
+        }
+    }
+
+    if (invalid){
+        reset_agent_position(env, agent_idx);
+        env->rewards[agent_idx] -= 0.1f;
+    }
+}
+
+void apply_agent_repulsion(CTipToeEnv* env, int agent_idx) {
+    Agent* self = &env->agents[agent_idx];
+    float repulsion_radius = CELL_SIZE * 0.75f;
+    float repulsion_strength = 2.0f;
+
+    for (int i = 0; i < env->num_agents; i++) {
+        if (i == agent_idx) continue;
+
+        Agent* other = &env->agents[i];
+        float dx = self->pos_x - other->pos_x;
+        float dy = self->pos_y - other->pos_y;
+        float dist_sq = dx * dx + dy * dy;
+
+        if (dist_sq < repulsion_radius * repulsion_radius && dist_sq > 0.0001f) {
+            float dist = sqrtf(dist_sq);
+            float repulsion = repulsion_strength / dist;
+
+            self->pos_x += repulsion * dx;
+            self->pos_y += repulsion * dy;
+            check_agent_in_invalid_position_agent_position(env, agent_idx);
+
+            other->pos_x -= repulsion * dx;
+            other->pos_y -= repulsion * dy;
+            check_agent_in_invalid_position_agent_position(env, i);
+        }
+    }
 }
 
 void move_agent(CTipToeEnv* env, int agent_idx, int action) {
@@ -211,48 +277,24 @@ void move_agent(CTipToeEnv* env, int agent_idx, int action) {
         case ACTION_NOOP: return;
     }
 
-    float new_x = agent->pos_x + move_dir_x * agent->velocity;
-    float new_y = agent->pos_y + move_dir_y * agent->velocity;
+    agent->pos_x += move_dir_x * agent->velocity;
+    agent->pos_y += move_dir_y * agent->velocity;
+
+    // Check if too close to other agents, if so then push them apart
+    apply_agent_repulsion(env, agent_idx);
+
+    //
+    check_agent_in_invalid_position_agent_position(env, agent_idx);
 
     // Reward: encourage upward motion
-    float neg_reward = -0.00001f * new_y;
+    float neg_reward = -0.00005f * agent->pos_y;
     env->rewards[agent_idx] += neg_reward;
-    // env->total_episode_reward += neg_reward;
+    agent->total_episode_reward += neg_reward;
 
-    // If out of bounds entirely, reset to bottom
-    if (new_x < 0.0f || new_x >= env->grid_size_x * CELL_SIZE || new_y < 0.0f || new_y >= (env->grid_size_y + 3) * CELL_SIZE) {
-        reset_agent(env, agent_idx);
-        env->rewards[agent_idx] -= 0.1f;
-        return;
-    }
+    // Check for episode end
+    int tile_y = (int) (agent->pos_y / CELL_SIZE);
 
-    // Check for stepping on a fake or removed tile
-    int finish_line_cell_size = 1;
-    int tile_x = (int) new_x / CELL_SIZE;
-    int tile_y = (int) (new_y - CELL_SIZE * finish_line_cell_size) / CELL_SIZE; // (Need to adjust for finish line cell size here)
-
-    if (tile_y < env->grid_size_y) // check if agent is even on the grid (no need to check for x since should always align in the x-axis with grid)
-    {
-        Tile* tile = &env->grid[get_grid_index(env, tile_x, tile_y)];
-
-        if (tile != NULL){
-            if (tile->state == TILE_REMOVED || tile->is_fake) {
-                tile->state = TILE_REMOVED;
-                reset_agent(env, agent_idx);
-                env->rewards[agent_idx] -= 0.1f;
-                return;
-            }
-            else if (tile->state == TILE_UNKNOWN){
-                tile->state = TILE_REAL;
-            }
-        }
-    }
-
-    // Move accepted
-    agent->pos_x = new_x;
-    agent->pos_y = new_y;
-
-    if (tile_y == 0) {
+    if (tile_y == 0) { // if at finish line
         env->rewards[agent_idx] += 1.0f;
         env->dones[agent_idx] = 1;
 
@@ -265,7 +307,6 @@ void move_agent(CTipToeEnv* env, int agent_idx, int action) {
 
 void reset(CTipToeEnv* env) {
     env->current_step = 0;
-    // env->total_episode_reward = 0;
 
     // Clear grid
     for (int i = 0; i < env->grid_size_x * env->grid_size_y; i++) {
@@ -281,7 +322,12 @@ void reset(CTipToeEnv* env) {
     while (y >= 0) {
         // Step 1: Lay down a horizontal row in a direction (left or right)
         bool go_right = rand() % 2;
-        int length = 2 + rand() % 5; // Zigzag length: 2 to 6 cells
+        if (path_x == 0)
+            go_right = true;
+        else if (path_x == env->grid_size_x - 1)
+            go_right = false;
+
+        int length = 0 + rand() % 8; // Zigzag length: 0 to 9 cells
 
         for (int i = 0; i < length && path_x >= 0 && path_x < env->grid_size_x; i++) {
             env->grid[get_grid_index(env, path_x, y)].is_fake = false;
@@ -307,11 +353,11 @@ void reset(CTipToeEnv* env) {
 
     // Initialize agents
     for (int i = 0; i < env->num_agents; i++) {
-        reset_agent(env, i);
-        env->agents[i].velocity = 10.0f;
+        reset_agent_position(env, i);
+        env->agents[i].velocity = 2.5f;
+        env->agents[i].total_episode_reward = 0;
     }
     
-
     compute_observations(env);
 }
 
@@ -337,6 +383,16 @@ void allocate(CTipToeEnv* env) {
     initialize_env(env);
 }
 
+float calculate_avg_total_episode_reward(CTipToeEnv* env){
+    // Calculate average total episode reward across all agents
+    float avg_total_episode_reward = 0;
+    for (int i = 0; i < env->num_agents; i++) {
+        avg_total_episode_reward = env->agents[i].total_episode_reward;
+    }
+    avg_total_episode_reward /= env->num_agents;
+    return avg_total_episode_reward;
+}
+
 
 void step(CTipToeEnv* env) {
     // Reset reward for each agent
@@ -355,7 +411,8 @@ void step(CTipToeEnv* env) {
         Log log = {0};
 
         log.episode_length = env->current_step;
-        // log.episode_return = env->total_episode_reward;
+
+        log.episode_return = calculate_avg_total_episode_reward(env);
 
         add_log(env->log_buffer, &log);
 
@@ -412,11 +469,6 @@ Client* make_client(CTipToeEnv* env) {
     return client;
 }
 
-int get_grid_render_offset() {
-    return CELL_SIZE + 2 * CELL_SIZE;  // finish + start zones
-}
-
-
 // Render the environment
 void render(Client* client, CTipToeEnv* env) {
     BeginDrawing();
@@ -426,12 +478,10 @@ void render(Client* client, CTipToeEnv* env) {
     DrawText(
         TextFormat("Step: %d\nTotal Episode Reward: %.2f",
             env->current_step,
-            0 // env->total_episode_reward
+            calculate_avg_total_episode_reward(env)
         ),
         5, 2, 10, PUFF_WHITE
     );
-
-    int render_offset_y = get_grid_render_offset();
 
     // Draw finish line (top)
     DrawRectangle(0,

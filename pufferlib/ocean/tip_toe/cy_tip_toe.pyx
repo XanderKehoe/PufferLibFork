@@ -26,10 +26,6 @@ cdef extern from "tip_toe.h":
         int num_agents
         int max_steps
 
-        float negative_reward
-        float positive_reward
-
-
     ctypedef struct Client
 
     void initialize_env(CTipToeEnv* env)
@@ -75,8 +71,6 @@ cdef class CyTipToe:
                 grid_size_y=grid_size_y, 
                 num_agents=num_agents,
                 max_steps=max_steps,
-                negative_reward=negative_reward,
-                positive_reward=positive_reward
             )
             initialize_env(&self.envs[i])
 

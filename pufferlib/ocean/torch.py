@@ -332,3 +332,67 @@ class TrashPickup(nn.Module):
         action = self.actor(flat_hidden)
         value = self.value_fn(flat_hidden)
         return action, value
+
+
+class TipToe(nn.Module):
+    def __init__(self, env, cnn_channels=32, hidden_size=128, **kwargs):
+        super().__init__()
+        self.grid_size_x = env.grid_size_x
+        self.grid_size_y = env.grid_size_y
+        self.num_agents = env.num_agents_per_env
+
+        self.obs_spatial_shape = (1, self.grid_size_y, self.grid_size_x)  # 1 channel
+        self.vector_obs_size = 2 + (self.num_agents - 1) * 2  # agent pos + rel positions
+
+        print(f"\nobs_spatial_shape = {self.obs_spatial_shape} | vector_obs_size = {self.vector_obs_size}\n")
+
+        self.cnn = nn.Sequential(
+            pufferlib.pytorch.layer_init(
+                nn.Conv2d(1, cnn_channels, kernel_size=3, stride=1, padding=1)),
+            nn.ReLU(),
+            pufferlib.pytorch.layer_init(
+                nn.Conv2d(cnn_channels, cnn_channels, kernel_size=3, stride=1, padding=1)),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+
+        # Calculate the flattened output size of the CNN
+        dummy_input = torch.zeros((1, *self.obs_spatial_shape))
+        with torch.no_grad():
+            cnn_output_size = self.cnn(dummy_input).shape[1]
+
+        self.vector_encoder = nn.Sequential(
+            pufferlib.pytorch.layer_init(nn.Linear(self.vector_obs_size, hidden_size)),
+            nn.ReLU(),
+        )
+
+        self.final_mlp = nn.Sequential(
+            pufferlib.pytorch.layer_init(nn.Linear(cnn_output_size + hidden_size, hidden_size)),
+            nn.ReLU(),
+        )
+
+        self.actor = pufferlib.pytorch.layer_init(
+            nn.Linear(hidden_size, env.single_action_space.n), std=0.01)
+        self.value_fn = pufferlib.pytorch.layer_init(
+            nn.Linear(hidden_size, 1), std=1)
+
+    def forward(self, observations):
+        hidden, _ = self.encode_observations(observations)
+        return self.decode_actions(hidden, None)
+
+    def encode_observations(self, observations):
+        batch_size = observations.shape[0]
+        grid_cells = self.grid_size_x * self.grid_size_y
+
+        # Split the observation into grid and vector parts
+        grid_obs = observations[:, :grid_cells].view(batch_size, 1, self.grid_size_y, self.grid_size_x).float()
+        vector_obs = observations[:, grid_cells:].float() / 255.0  # normalize bytes
+
+        cnn_out = self.cnn(grid_obs)
+        vector_out = self.vector_encoder(vector_obs)
+
+        combined = torch.cat([cnn_out, vector_out], dim=-1)
+        return self.final_mlp(combined), None
+
+    def decode_actions(self, flat_hidden, lookup, concat=None):
+        return self.actor(flat_hidden), self.value_fn(flat_hidden)
