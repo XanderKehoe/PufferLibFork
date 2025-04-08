@@ -51,16 +51,29 @@ void demo(int grid_size_x, int grid_size_y, int num_agents, int max_steps) {
                 env.actions[0] = ACTION_NOOP;
 
                 // Handle keyboard input only for selected agent
-                if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) {
+                // TODO - handle UP-RIGHT, LEFT_DOWN, LEFT_RIGHT, AND RIGHT_UP
+                if ((IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) && (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))){
+                    env.actions[0] = ACTION_UP_RIGHT;
+                }
+                else if ((IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) && (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))){
+                    env.actions[0] = ACTION_RIGHT_DOWN;
+                }
+                else if ((IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) && (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))){
+                    env.actions[0] = ACTION_DOWN_LEFT;
+                }
+                else if ((IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) && (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))){
+                    env.actions[0] = ACTION_LEFT_UP;
+                }
+                else if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) {
                     env.actions[0] = ACTION_UP;
                 }
-                if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) {
+                else if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) {
                     env.actions[0] = ACTION_LEFT;
                 }
-                if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) {
+                else if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) {
                     env.actions[0] = ACTION_RIGHT;
                 }
-                if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) { 
+                else if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) { 
                     env.actions[0] = ACTION_DOWN; 
                 }
             }
@@ -87,7 +100,7 @@ void performance_test() {
     CTipToeEnv env = {
         .grid_size_x = 10,
         .grid_size_y = 10,
-        .num_agents = 4,
+        .num_agents = 10,
         .max_steps = 150,
     };
     allocate(&env);
@@ -98,7 +111,7 @@ void performance_test() {
     int inc = env.num_agents;
     while (time(NULL) - start < test_time) {
         for (int e = 0; e < env.num_agents; e++) {
-            env.actions[e] = rand() % 5;
+            env.actions[e] = rand() % 9;
         }
 
         step(&env);
@@ -112,7 +125,7 @@ void performance_test() {
 
 // Main entry point
 int main() {
-    demo(10, 10, 3, 150); // Visual demo
-    //performance_test(); // Uncomment for benchmarking
+    demo(10, 10, 10, 150); // Visual demo
+    // performance_test(); // Uncomment for benchmarking - SPS is 400k-ish on my computer
     return 0;
 }
