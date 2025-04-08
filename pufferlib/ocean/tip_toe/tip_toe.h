@@ -1,0 +1,473 @@
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+#include "raylib.h"
+
+#define ACTION_UP 0
+#define ACTION_UP_RIGHT 1
+#define ACTION_RIGHT 2
+#define ACTION_RIGHT_DOWN 3
+#define ACTION_DOWN 4
+#define ACTION_DOWN_LEFT 5
+#define ACTION_LEFT 6
+#define ACTION_LEFT_UP 7
+#define ACTION_NOOP 8
+
+#define TILE_UNKNOWN 0
+#define TILE_FAKE    1
+#define TILE_REAL    2
+
+#define CELL_SIZE 40
+
+#define LOG_BUFFER_SIZE 1024
+
+typedef struct Log {
+    float episode_return;
+    float episode_length;
+} Log;
+
+typedef struct LogBuffer {
+    Log* logs;
+    int length;
+    int idx;
+} LogBuffer;
+
+// LogBuffer functions
+LogBuffer* allocate_logbuffer(int size) {
+    LogBuffer* logs = (LogBuffer*)calloc(1, sizeof(LogBuffer));
+    logs->logs = (Log*)calloc(size, sizeof(Log));
+    logs->length = size;
+    logs->idx = 0;
+    return logs;
+}
+
+void free_logbuffer(LogBuffer* buffer) {
+    free(buffer->logs);
+    free(buffer);
+}
+
+Log aggregate_and_clear(LogBuffer* logs) {
+    Log log = {0};
+    if (logs->idx == 0) {
+        return log;
+    }
+    for (int i = 0; i < logs->idx; i++) {
+        log.episode_return += logs->logs[i].episode_return;
+        log.episode_length += logs->logs[i].episode_length;
+    }
+    log.episode_return /= logs->idx;
+    log.episode_length /= logs->idx;
+    logs->idx = 0;
+    return log;
+}
+
+void add_log(LogBuffer* logs, Log* log) {
+    if (logs->idx == logs->length) {
+        return;
+    }
+    logs->logs[logs->idx] = *log;
+    logs->idx += 1;
+}
+
+typedef struct {
+    int state;  // TILE_UNKNOWN, TILE_FAKE, TILE_REAL
+    bool is_removed;  // True if stepped on and fake
+} Tile;
+
+typedef struct {
+    float pos_x;
+    float pos_y;
+
+    float velocity;
+
+    float closest_distance_to_goal;
+} Agent;
+
+typedef struct {
+    // Interface for PufferLib
+    char* observations;
+    int* actions;
+    float* rewards;
+    unsigned char* dones;
+    LogBuffer* log_buffer;
+
+    int grid_size_x;
+    int grid_size_y;
+    int num_agents;
+    int max_steps;
+    int current_step;
+
+    Agent* agents;
+    Tile* grid;
+    float start_y;
+    float finish_y;
+
+    float total_episode_reward;
+
+    int total_num_obs;
+
+    bool do_human_control;
+} CTipToeEnv;
+
+int get_grid_index(CTipToeEnv* env, int x, int y) {
+    return (y * env->grid_size_x) + x;
+}
+
+void compute_observations(CTipToeEnv* env) {
+    char* obs = env->observations;
+    memset(obs, 0, env->total_num_obs * sizeof(char));
+
+    int obs_per_agent = env->grid_size_x * env->grid_size_y + (env->num_agents - 1);
+    
+    for (int i = 0; i < env->num_agents; i++) {
+        int offset = i * obs_per_agent;
+
+        // Encode tile states
+        for (int y = 0; y < env->grid_size_y; y++) {
+            for (int x = 0; x < env->grid_size_x; x++) {
+                Tile* tile = &env->grid[get_grid_index(env, x, y)];
+                obs[offset++] = (char)(tile->is_removed ? TILE_FAKE : tile->state);
+            }
+        }
+
+        // Add distance to other agents
+        Agent* a = &env->agents[i];
+        for (int j = 0; j < env->num_agents; j++) {
+            if (i == j) continue;
+            Agent* b = &env->agents[j];
+            float dx = b->pos_x - a->pos_x;
+            float dy = b->pos_y - a->pos_y;
+            float dist = sqrtf(dx*dx + dy*dy) / (float)(env->grid_size_y);
+            obs[offset++] = (char)(dist * 255);  // store as 0–255 normalized
+        }
+    }
+}
+
+void reset(CTipToeEnv* env); // declaration here so we can use before defined.
+
+void reset_agent(CTipToeEnv* env, int agent_index){
+    Agent* agent = &env->agents[agent_index];
+    agent->pos_x = (rand() % env->grid_size_x) * CELL_SIZE;
+    agent->pos_y = env->start_y;
+}
+
+void move_agent(CTipToeEnv* env, int agent_idx, int action) {
+    Agent* agent = &env->agents[agent_idx];
+
+    int move_dir_x = 0, move_dir_y = 0;
+    switch (action) {
+        case ACTION_UP: move_dir_y = -1; break;
+        case ACTION_UP_RIGHT: move_dir_y = -1; move_dir_x = 1; break;
+        case ACTION_RIGHT: move_dir_x = 1; break;
+        case ACTION_RIGHT_DOWN: move_dir_y = 1; move_dir_x = 1; break;
+        case ACTION_DOWN: move_dir_y = 1; break;
+        case ACTION_DOWN_LEFT: move_dir_y = 1; move_dir_x = -1; break;
+        case ACTION_LEFT: move_dir_x = -1; break;
+        case ACTION_LEFT_UP: move_dir_y = -1; move_dir_x = -1; break;
+        case ACTION_NOOP: return;
+    }
+
+    float new_x = agent->pos_x + move_dir_x * agent->velocity;
+    float new_y = agent->pos_y + move_dir_y * agent->velocity;
+
+    // Reward: encourage upward motion
+    float neg_reward = -0.01f * (float)(env->grid_size_y - new_y);
+    env->rewards[agent_idx] += neg_reward;
+    env->total_episode_reward += neg_reward;
+
+    // If out of bounds entirely, reset to bottom
+    if (new_x < 0.0f || new_x >= env->grid_size_x * CELL_SIZE || new_y < 0.0f || new_y >= (env->grid_size_y + 3) * CELL_SIZE) {
+        printf("\n Out of bounds \n");
+        reset_agent(env, agent_idx);
+        env->rewards[agent_idx] -= 0.1f;
+        return;
+    }
+
+    // Check for stepping on a fake or removed tile
+    int tile_x = (int) new_x / CELL_SIZE;
+    int tile_y = (int) (new_y - CELL_SIZE) / CELL_SIZE;
+
+    if (tile_y < env->grid_size_y) // check if agent is even on the grid (no need to check for x since should always align in the x-axis with grid)
+    {
+        Tile* tile = &env->grid[get_grid_index(env, tile_x, tile_y)];
+
+        if (tile != NULL){
+            printf("\nTile: %d %d\n", tile_x, tile_y);
+            if (tile->state == TILE_FAKE || tile->is_removed) {
+                printf("\n Fake or removed tile \n");
+                tile->is_removed = true;
+                reset_agent(env, agent_idx);
+                env->rewards[agent_idx] -= 0.1f;
+                return;
+            }
+        }
+    }
+
+    // Move accepted
+    agent->pos_x = new_x;
+    agent->pos_y = new_y;
+
+    if (tile_y == 0) {
+        env->rewards[agent_idx] += 1.0f;
+        env->dones[agent_idx] = 1;
+
+        Log log = { .episode_return = env->rewards[agent_idx], .episode_length = env->current_step };
+        add_log(env->log_buffer, &log);
+
+        reset(env);
+    }
+}
+
+void reset(CTipToeEnv* env) {
+    env->current_step = 0;
+    env->total_episode_reward = 0;
+
+    // Clear grid
+    for (int i = 0; i < env->grid_size_x * env->grid_size_y; i++) {
+        env->grid[i].state = TILE_FAKE;
+        env->grid[i].is_removed = false;
+    }
+
+    // Start from bottom row - 1 (right above the start zone)
+    int path_x = rand() % env->grid_size_x;
+    int y = env->grid_size_y - 1; // last grid row index
+
+    while (y > env->finish_y) {
+        // Step 1: Lay down a horizontal row in a direction (left or right)
+        bool go_right = rand() % 2;
+        int length = 2 + rand() % 5; // Zigzag length: 2 to 6 cells
+
+        for (int i = 1; i < length && path_x >= 0 && path_x < env->grid_size_x; i++) {
+            env->grid[get_grid_index(env, path_x, y)].state = TILE_REAL;
+
+            // Move in horizontal direction
+            path_x += go_right ? 1 : -1;
+            if (path_x < 0) { path_x = 0; break; }
+            if (path_x >= env->grid_size_x) { path_x = env->grid_size_x - 1; break; }
+        }
+
+        // Step 2: Drop down one row and place a single bridge tile
+        y -= 1;
+        if (y < env->finish_y) 
+            break;
+
+        env->grid[get_grid_index(env, path_x, y)].state = TILE_REAL;
+    }
+
+    // Initialize agents
+    for (int i = 0; i < env->num_agents; i++) {
+        reset_agent(env, i);
+        env->agents[i].velocity = 5.0f;
+    }
+    
+
+    compute_observations(env);
+}
+
+
+
+
+// Environment functions
+void initialize_env(CTipToeEnv* env) {
+    env->current_step = 0;
+    env->grid = (Tile*)calloc(env->grid_size_x * env->grid_size_y, sizeof(Tile));
+    env->agents = (Agent*)calloc(env->num_agents, sizeof(Agent));
+    env->total_num_obs = env->num_agents * (2 + (env->grid_size_x * env->grid_size_y) + ((env->num_agents - 1) * 2)); // Ensure this matches in allocate()
+    env->finish_y = (float)(CELL_SIZE);  // pixel offset of top of grid
+    env->start_y = (float)((env->grid_size_y + 2) * CELL_SIZE);  // pixel offset into start zone
+
+    reset(env);
+}
+
+void allocate(CTipToeEnv* env) {
+    env->total_num_obs = env->num_agents * (2 + (env->grid_size_x * env->grid_size_y) + ((env->num_agents - 1) * 2)); // Ensure this matches in initialize_env()
+    env->observations = (char*)calloc(env->total_num_obs, sizeof(char));
+    env->actions = (int*)calloc(env->num_agents, sizeof(int));
+    env->rewards = (float*)calloc(env->num_agents, sizeof(float));
+    env->dones = (unsigned char*)calloc(env->num_agents, sizeof(unsigned char));
+    env->log_buffer = allocate_logbuffer(LOG_BUFFER_SIZE);
+    initialize_env(env);
+}
+
+
+void step(CTipToeEnv* env) {
+    // Reset reward for each agent
+    memset(env->rewards, 0, sizeof(float) * env->num_agents);
+    memset(env->dones, 0, sizeof(unsigned char) * env->num_agents);
+
+    for (int i = 0; i < env->num_agents; i++) {
+        move_agent(env, i, env->actions[i]);
+    }
+
+    env->current_step++;
+    if (env->current_step >= env->max_steps) 
+    {
+        memset(env->dones, 1, sizeof(unsigned char) * env->num_agents);
+
+        Log log = {0};
+
+        log.episode_length = env->current_step;
+        log.episode_return = env->total_episode_reward;
+
+        add_log(env->log_buffer, &log);
+
+        reset(env);
+    }
+
+    compute_observations(env);
+}
+
+void free_initialized(CTipToeEnv* env) {
+    free(env->agents);
+}
+
+void free_allocated(CTipToeEnv* env) {
+    free(env->observations);
+    free(env->actions);
+    free(env->rewards);
+    free(env->dones);
+    free_logbuffer(env->log_buffer);
+    free_initialized(env);
+}
+
+const Color PUFF_RED = (Color){187, 0, 0, 255};
+const Color PUFF_CYAN = (Color){0, 187, 187, 255};
+const Color PUFF_WHITE = (Color){241, 241, 241, 241};
+const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
+const Color PUFF_LINES = (Color){50, 50, 50, 255};
+
+typedef struct Client {
+    int window_width;
+    int window_height;
+    int header_offset;
+    int cell_size;
+    Texture2D agent_texture;
+} Client;
+
+// Initialize a rendering client
+Client* make_client(CTipToeEnv* env) {
+    Client* client = (Client*)malloc(sizeof(Client));
+    client->cell_size = CELL_SIZE;
+    client->header_offset = 60;
+    client->window_width = env->grid_size_x * CELL_SIZE;
+    client->window_height = env->grid_size_y * CELL_SIZE
+                      + client->header_offset
+                      + 2 * CELL_SIZE  // start zone
+                      + CELL_SIZE;     // finish line
+
+    InitWindow(client->window_width, client->window_height, "Tip Toe Environment");
+    SetTargetFPS(60);
+
+    client->agent_texture = LoadTexture("resources/puffers_128.png");
+
+    return client;
+}
+
+int get_grid_render_offset() {
+    return CELL_SIZE + 2 * CELL_SIZE;  // finish + start zones
+}
+
+
+// Render the environment
+void render(Client* client, CTipToeEnv* env) {
+    BeginDrawing();
+    ClearBackground(PUFF_BACKGROUND);
+
+    // Header
+    DrawText(
+        TextFormat("Step: %d\nTotal Episode Reward: %.2f",
+            env->current_step,
+            env->total_episode_reward
+        ),
+        5, 2, 10, PUFF_WHITE
+    );
+
+    int render_offset_y = get_grid_render_offset();
+
+    // Draw finish line (top)
+    DrawRectangle(0,
+                  client->header_offset,
+                  env->grid_size_x * CELL_SIZE,
+                  CELL_SIZE,
+                  (Color){0, 200, 0, 80});  // Light green
+
+    DrawRectangleLines(0,
+                       client->header_offset,
+                       env->grid_size_x * CELL_SIZE,
+                       CELL_SIZE,
+                       (Color){0, 255, 0, 255});
+
+    // Draw grid tiles
+    for (int y = 0; y < env->grid_size_y; y++) {
+        for (int x = 0; x < env->grid_size_x; x++) {
+            int screen_x = x * CELL_SIZE;
+            int screen_y = y * CELL_SIZE + client->header_offset + CELL_SIZE;  // after finish line
+
+            Tile* tile = &env->grid[get_grid_index(env, x, y)];
+
+            Color tile_color;
+            if (tile->is_removed) {
+                tile_color = PUFF_RED;
+            } else if (tile->state == TILE_REAL) {
+                tile_color = PUFF_CYAN;
+            } else {
+                tile_color = (Color){80, 80, 80, 255};
+            }
+
+            DrawRectangle(screen_x, screen_y, CELL_SIZE, CELL_SIZE, tile_color);
+            DrawRectangleLines(screen_x, screen_y, CELL_SIZE, CELL_SIZE, PUFF_LINES);
+        }
+    }
+
+    // Draw start zone (bottom)
+    DrawRectangle(0,
+                  client->header_offset + CELL_SIZE + env->grid_size_y * CELL_SIZE,
+                  env->grid_size_x * CELL_SIZE,
+                  2 * CELL_SIZE,
+                  (Color){200, 200, 0, 80});  // Light yellow
+
+    DrawRectangleLines(0,
+                       client->header_offset + CELL_SIZE + env->grid_size_y * CELL_SIZE,
+                       env->grid_size_x * CELL_SIZE,
+                       2 * CELL_SIZE,
+                       (Color){255, 255, 0, 255});
+
+    // Draw agents
+    for (int i = 0; i < env->num_agents; i++) {
+        Agent* agent = &env->agents[i];
+
+        float screen_x = agent->pos_x;
+        float screen_y = agent->pos_y + client->header_offset;
+
+        Color agent_color = (env->do_human_control && i == 0)
+                            ? (Color){255, 128, 128, 255}
+                            : WHITE;
+
+        DrawTexturePro(
+            client->agent_texture,
+            (Rectangle){0, 0, 128, 128},
+            (Rectangle){
+                screen_x, screen_y,
+                client->cell_size, client->cell_size
+            },
+            (Vector2){client->cell_size / 2, client->cell_size / 2},
+            0,
+            agent_color
+        );
+                            
+    }
+
+
+    EndDrawing();
+}
+
+
+// Cleanup and free the rendering client
+void close_client(Client* client) {
+    UnloadTexture(client->agent_texture);
+    CloseWindow();
+    free(client);
+}
